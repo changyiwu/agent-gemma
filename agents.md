@@ -7,6 +7,14 @@
 
 讓 OpenCode 能呼叫本機的 Google Gemma（透過 Ollama）。核心產出是一支 PowerShell 7 腳本，在一台全新的 Windows 電腦上完成：偵測顯示卡 → 依 VRAM 選出跑得動的 Gemma 版本 → 安裝 Ollama → 下載模型 → 設定上下文長度 → 寫入 `opencode.json` → 實際送訊息驗證。
 
+## 同步層級
+
+| 層級 | 位置 | 用途 |
+|------|------|------|
+| L1 本地 | `我的雲端硬碟/agents/agent-gemma`（GDrive 同步） | `agents.md` 藍圖＋`handoff.md` 交接＋`CLAUDE.md` 橋接 |
+| L2 GitHub | [changyiwu/agent-gemma](https://github.com/changyiwu/agent-gemma)（**公開**） | 版本控制與雲端備份（`handoff.md` 不進 repo） |
+| L3 Obsidian | vault 內 `agent-gemma/專案工作流程.md` | 詳細脈絡、決策紀錄、踩坑筆記、更動紀錄 |
+
 ## 關鍵時程
 
 目前沒有固定時程。
@@ -19,8 +27,8 @@
 - [x] 階段四：完成 `SKILL.md` 與 README
 - [x] 階段五：在這台電腦實跑完整流程並驗證（CONTEXT 131072、100% GPU）
 - [x] 階段六：加入 Apple Silicon macOS 支援；測試擴充到 59 項
-- [ ] 階段七：在實體 Mac 上驗證 macOS 路徑（目前只有邏輯與 plist 格式測試，沒有實機跑過）
-- [ ] 階段八：GitHub 與 Obsidian 初始化
+- [x] 階段七：專案初始化三層級（L1 本地、L2 公開 GitHub、L3 Obsidian）
+- [ ] 階段八：在實體 Mac 上驗證 macOS 路徑（目前只有邏輯與 plist 格式測試，沒有實機跑過）
 
 技能刻意**不**同步到全域技能目錄，見下方「技術決策」。
 
