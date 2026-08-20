@@ -146,7 +146,7 @@ PARAMETER num_ctx 16384
 | `-Model <tag>` | 指定模型，跳過自動選型 |
 | `-Context <n>` | 指定上下文長度，跳過自動建議 |
 | `-KvCache q8_0` | KV cache 量化，相同 VRAM 可塞下約兩倍上下文，品質損失很小 |
-| `-ConfigPath <path>` | 改寫別的設定檔（預設 `~/.config/opencode/opencode.json`） |
+| `-ConfigPath <path>` | 改寫別的設定檔（預設 `~/.config/opencode/opencode.json`；同目錄的 `.jsonc` 也會被盤點並警告） |
 | `-SkipInstall` | 已自行裝好 Ollama 時跳過安裝 |
 | `-Yes` | 全程不詢問 |
 
@@ -184,7 +184,7 @@ pwsh -NoProfile -File ./.opencode/skills/gemma-setup/setup-gemma.ps1 -Model gemm
 pwsh -NoProfile -File ./tests/test-setup-gemma.ps1
 ```
 
-59 項，涵蓋語法與編碼、Windows 與 Apple Silicon 兩條選型路徑、顯卡篩選、LaunchAgent 的 plist 是否為合法 XML、以及設定合併與備份。
+72 項，涵蓋語法與編碼、Windows 與 Apple Silicon 兩條選型路徑、顯卡篩選、LaunchAgent 的 plist 是否為合法 XML、以及設定合併與備份、`.json`／`.jsonc` 並存的處理。
 
 ## 資料夾結構
 

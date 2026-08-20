@@ -53,6 +53,9 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+# 使用者明確指定 -ConfigPath 就完全照辦；沒指定才由腳本判斷 .json / .jsonc 該寫哪份
+$ConfigPathExplicit = $PSBoundParameters.ContainsKey('ConfigPath')
+
 # ---------------------------------------------------------------- 常數
 
 $OllamaApi    = 'http://localhost:11434'
@@ -446,16 +449,100 @@ function Set-OllamaContext {
 
 # ---------------------------------------------------------------- OpenCode 設定
 
+function Read-OpenCodeConfig {
+    <#
+      讀一份 OpenCode 設定成 hashtable。檔案不存在、是空的、或內容壞掉都回空表，
+      讓呼叫端不必各自 try/catch。PowerShell 7 的 ConvertFrom-Json 容得下 JSONC
+      的註解與尾逗號，所以 .jsonc 也走這支。
+    #>
+    param([string] $Path)
+
+    if (-not (Test-Path $Path)) { return @{} }
+    try {
+        $raw = Get-Content -Path $Path -Raw -Encoding UTF8
+        if (-not $raw.Trim()) { return @{} }
+        $parsed = $raw | ConvertFrom-Json -AsHashtable
+        if ($parsed -is [hashtable]) { return $parsed }
+        return @{}
+    } catch {
+        Write-Warn2 "$(Split-Path -Leaf $Path) 解析失敗，當成空設定處理：$($_.Exception.Message)"
+        return @{}
+    }
+}
+
+function Test-HasOllamaProvider {
+    param([hashtable] $Config)
+    return ($Config.ContainsKey('provider') -and
+            $Config['provider'] -is [hashtable] -and
+            $Config['provider'].ContainsKey('ollama'))
+}
+
+function Resolve-OpenCodeConfig {
+    <#
+      OpenCode 會把同目錄的 opencode.json 與 opencode.jsonc **兩份都讀進來合併**，
+      但本腳本只維護其中一份。兩份並存時若沉默地只寫一份，另一份的舊模型定義會留在
+      模型清單裡變成死項目（模型一刪就選了會失敗），而 -Check 也會因為只看一份而
+      給出假陰性。所以動手前先盤點：哪幾份存在、哪幾份定義了 provider.ollama。
+
+      回傳 @{ Target; Present; WithOllama; Explicit }
+        Target     = 要寫入的那一份
+        Present    = 實際存在的設定檔
+        WithOllama = 其中已經定義 provider.ollama 的
+        Explicit   = 使用者是否用 -ConfigPath 明確指定（指定了就完全照辦，不做推測）
+    #>
+    param([string] $Path, [bool] $Explicit = $false)
+
+    $dir  = Split-Path -Parent $Path
+    $base = [System.IO.Path]::GetFileNameWithoutExtension($Path)
+    $json  = Join-Path $dir "$base.json"
+    $jsonc = Join-Path $dir "$base.jsonc"
+
+    # 同目錄的兩個檔名都要盤點，這樣連 -ConfigPath 指到別處時也看得到並存問題
+    $present    = @(@($json, $jsonc) | Where-Object { Test-Path $_ } | Select-Object -Unique)
+    $withOllama = @($present | Where-Object { Test-HasOllamaProvider (Read-OpenCodeConfig -Path $_) })
+
+    # 明確指定 -ConfigPath 就寫那一份，不做推測（但上面的盤點與警告照樣進行）。
+    # 沒指定時：只有 .jsonc 存在就寫 .jsonc（硬生一個 .json 只會讓並存問題更糟），
+    # 其餘一律以 .json 為準 —— 它是預設檔名，而且寫回時註解本來就保不住。
+    $target =
+        if ($Explicit) { $Path }
+        elseif ((Test-Path $jsonc) -and -not (Test-Path $json)) { $jsonc }
+        else { $json }
+
+    return @{ Target = $target; Present = $present; WithOllama = $withOllama; Explicit = $Explicit }
+}
+
+function Write-ConfigLayoutWarning {
+    <# 把「兩份並存」這件事講清楚，並指出使用者需要手動處理什麼。 #>
+    param($Resolved)
+
+    if ($Resolved.Present.Count -le 1) { return }
+
+    Write-Warn2 'OpenCode 同時讀 opencode.json 與 opencode.jsonc 並合併生效，這台兩份都存在：'
+    foreach ($p in $Resolved.Present) {
+        $mark = if ($Resolved.WithOllama -contains $p) { '（已定義 provider.ollama）' } else { '' }
+        Write-Info "  - $(Split-Path -Leaf $p)$mark"
+    }
+
+    $strays = @($Resolved.WithOllama | Where-Object { $_ -ne $Resolved.Target })
+    if ($strays) {
+        Write-Warn2 "本腳本只會寫 $(Split-Path -Leaf $Resolved.Target)。上列另一份裡的 ollama 模型定義不會被清掉，"
+        Write-Warn2 '會在 OpenCode 的模型清單留下重複或已失效的項目 — 請手動移除那一份的 provider.ollama。'
+    }
+}
+
 function Update-OpenCodeConfig {
     param([string] $Path, [string] $Tag, [int] $Ctx)
+
+    if ([System.IO.Path]::GetExtension($Path) -eq '.jsonc') {
+        Write-Warn2 '寫入的是 .jsonc：設定會以 ConvertTo-Json 重新輸出，檔案裡的註解會全部消失。'
+    }
 
     $dir = Split-Path -Parent $Path
     if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
 
-    $config = @{}
+    $config = Read-OpenCodeConfig -Path $Path
     if (Test-Path $Path) {
-        $raw = Get-Content -Path $Path -Raw -Encoding UTF8
-        if ($raw.Trim()) { $config = $raw | ConvertFrom-Json -AsHashtable }
         $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
         $backup = "$Path.bak-$stamp"
         $n = 1
@@ -564,19 +651,50 @@ function Show-Status {
         else { Write-Warn2 '沒有 LaunchAgent — launchctl 的設定會在重開機後失效' }
     }
 
-    if (Test-Path $ConfigPath) {
-        $cfg = Get-Content $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json -AsHashtable
-        if ($cfg.ContainsKey('provider') -and $cfg['provider'].ContainsKey('ollama')) {
-            foreach ($m in $cfg['provider']['ollama']['models'].Keys) {
-                $entry = $cfg['provider']['ollama']['models'][$m]
+    # 兩份設定會被 OpenCode 合併，所以這裡逐份看，不能只讀一份就下結論
+    $resolved = Resolve-OpenCodeConfig -Path $ConfigPath -Explicit $ConfigPathExplicit
+    if (-not $resolved.Present) {
+        Write-Warn2 "找不到 OpenCode 設定（$ConfigPath）"
+    } else {
+        Write-ConfigLayoutWarning -Resolved $resolved
+        foreach ($p in $resolved.Present) {
+            $leaf = Split-Path -Leaf $p
+            $cfg  = Read-OpenCodeConfig -Path $p
+            if (-not (Test-HasOllamaProvider $cfg)) {
+                Write-Info "$leaf：沒有 ollama provider"
+                continue
+            }
+            $models = $cfg['provider']['ollama']['models']
+            if ($models -isnot [hashtable] -or $models.Keys.Count -eq 0) {
+                Write-Warn2 "$leaf：有 ollama provider 但沒有任何模型"
+                continue
+            }
+            foreach ($m in $models.Keys) {
+                $entry = $models[$m]
                 if ($entry -is [hashtable] -and $entry.ContainsKey('limit') -and $entry['limit']['context']) {
-                    Write-Ok "OpenCode 模型 $m -> limit.context = $($entry['limit']['context'])"
+                    Write-Ok "$leaf：模型 $m -> limit.context = $($entry['limit']['context'])"
                 } else {
-                    Write-Warn2 "OpenCode 模型 $m 沒有有效的 limit.context（contextLength 不是合法欄位，不會生效）"
+                    Write-Warn2 "$leaf：模型 $m 沒有有效的 limit.context（contextLength 不是合法欄位，不會生效）"
                 }
             }
-        } else { Write-Warn2 'OpenCode 設定裡沒有 ollama provider' }
-    } else { Write-Warn2 "找不到 $ConfigPath" }
+        }
+        if (-not $resolved.WithOllama) { Write-Warn2 'OpenCode 設定裡沒有 ollama provider' }
+
+        # 設定檔列了、但 Ollama 上其實沒有的模型 —— 就是這次踩到的死項目
+        if ((Test-OllamaUp) -and (Get-Command ollama -ErrorAction SilentlyContinue)) {
+            $installed = @(& ollama list | Select-Object -Skip 1 | ForEach-Object { ($_ -split '\s+')[0] } | Where-Object { $_ })
+            foreach ($p in $resolved.WithOllama) {
+                $cfg = Read-OpenCodeConfig -Path $p
+                $models = $cfg['provider']['ollama']['models']
+                if ($models -isnot [hashtable]) { continue }
+                foreach ($m in $models.Keys) {
+                    if ($installed -notcontains $m) {
+                        Write-Warn2 "$(Split-Path -Leaf $p)：模型 $m 在設定裡但 Ollama 沒有這顆 — 選了會失敗，建議移除"
+                    }
+                }
+            }
+        }
+    }
 
     if (Test-OllamaUp) {
         Write-Info '已載入的模型：'
@@ -631,8 +749,10 @@ if ($envChanged) {
 }
 
 Write-Step '寫入 OpenCode 設定'
-if (Confirm-Step "要更新 $ConfigPath 嗎？（會先自動備份）") {
-    Update-OpenCodeConfig -Path $ConfigPath -Tag $tag -Ctx $ctx
+$resolved = Resolve-OpenCodeConfig -Path $ConfigPath -Explicit $ConfigPathExplicit
+Write-ConfigLayoutWarning -Resolved $resolved
+if (Confirm-Step "要更新 $($resolved.Target) 嗎？（會先自動備份）") {
+    Update-OpenCodeConfig -Path $resolved.Target -Tag $tag -Ctx $ctx
 } else {
     Write-Warn2 '略過 OpenCode 設定'
 }

@@ -232,6 +232,65 @@ Assert-Equal 2 (Get-ChildItem $tmpDir -Filter 'opencode.json.bak-*').Count '同�
 
 Remove-Item $tmpDir -Recurse -Force
 
+# ---- .json / .jsonc 並存 ------------------------------------------------
+
+Write-Host "`n[8] opencode.json / opencode.jsonc 並存" -ForegroundColor Cyan
+
+$dualDir = Join-Path ([System.IO.Path]::GetTempPath()) "gemma-dual-$(Get-Random)"
+New-Item -ItemType Directory -Path $dualDir -Force | Out-Null
+$dualJson  = Join-Path $dualDir 'opencode.json'
+$dualJsonc = Join-Path $dualDir 'opencode.jsonc'
+
+# JSONC 帶註解與尾逗號 —— PowerShell 7 的 ConvertFrom-Json 容得下，5.1 不行
+$jsoncBody = @'
+{
+  // 舊設定，模型早就從 Ollama 刪掉了
+  "provider": {
+    "ollama": {
+      "models": { "gemma4:e4b": { "name": "Gemma 4 E4B" } },
+    },
+  },
+}
+'@
+[System.IO.File]::WriteAllText($dualJsonc, $jsoncBody, (New-Object System.Text.UTF8Encoding($false)))
+
+$parsedJsonc = Read-OpenCodeConfig -Path $dualJsonc
+Assert-True ($parsedJsonc.Count -gt 0)                    'JSONC（含註解與尾逗號）可以解析'
+Assert-True (Test-HasOllamaProvider $parsedJsonc)         'JSONC 裡的 provider.ollama 偵測得到'
+
+# 只有 .jsonc 時，寫入目標就是 .jsonc（不硬生一個 .json 出來）
+$onlyJsonc = Resolve-OpenCodeConfig -Path $dualJson -Explicit $false
+Assert-Equal $dualJsonc $onlyJsonc.Target                 '只有 .jsonc 時寫入目標是 .jsonc'
+Assert-Equal 1 $onlyJsonc.Present.Count                   '只有 .jsonc 時盤點到 1 份設定'
+
+# 兩份並存：目標回到 .json，但兩份都要被盤點出來
+[System.IO.File]::WriteAllText($dualJson, '{ "provider": { "ollama": { "models": {} } } }', (New-Object System.Text.UTF8Encoding($false)))
+$dual = Resolve-OpenCodeConfig -Path $dualJson -Explicit $false
+Assert-Equal $dualJson $dual.Target                       '兩份並存時以 .json 為寫入目標'
+Assert-Equal 2 $dual.Present.Count                        '兩份並存時兩份都被盤點到'
+Assert-Equal 2 $dual.WithOllama.Count                     '兩份的 provider.ollama 都被認出來'
+
+# 明確指定 -ConfigPath：目標照辦，但盤點與警告不受影響（這是踩坑後改的行為）
+$explicit = Resolve-OpenCodeConfig -Path $dualJsonc -Explicit $true
+Assert-Equal $dualJsonc $explicit.Target                  '明確指定路徑時以該路徑為寫入目標'
+Assert-Equal 2 $explicit.Present.Count                    '明確指定路徑時仍會盤點同目錄的另一份'
+
+# 壞掉的設定檔不該讓整支腳本炸掉
+$brokenPath = Join-Path $dualDir 'broken.json'
+[System.IO.File]::WriteAllText($brokenPath, '{ this is not json', (New-Object System.Text.UTF8Encoding($false)))
+$broken = Read-OpenCodeConfig -Path $brokenPath
+Assert-Equal 0 $broken.Count                              '壞掉的設定檔回空表而不是丟例外'
+Assert-Equal 0 (Read-OpenCodeConfig -Path (Join-Path $dualDir 'nope.json')).Count '不存在的設定檔回空表'
+
+# 寫入 .jsonc 後，註解確實不見了（這正是建議統一用 .json 的理由）
+Update-OpenCodeConfig -Path $dualJsonc -Tag 'gemma4:e4b-it-qat' -Ctx 32768 | Out-Null
+$afterWrite = Get-Content $dualJsonc -Raw -Encoding UTF8
+                                                          # 不能用 '//' 判斷 — baseURL 的 http:// 也會中
+Assert-True ($afterWrite -notmatch '舊設定')              '寫入 .jsonc 後註解會被 ConvertTo-Json 清掉'
+Assert-True ((Read-OpenCodeConfig -Path $dualJsonc)['provider']['ollama']['models'].ContainsKey('gemma4:e4b')) '寫入 .jsonc 時既有模型仍保留'
+
+Remove-Item $dualDir -Recurse -Force
+
 # ---- 結果 ---------------------------------------------------------------
 
 Write-Host ''

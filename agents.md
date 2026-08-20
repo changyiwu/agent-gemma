@@ -30,7 +30,7 @@
 - [x] 階段七：專案初始化三層級（L1 本地、L2 公開 GitHub、L3 Obsidian）
 - [ ] 階段八：在實體 Mac 上驗證 macOS 路徑（目前只有邏輯與 plist 格式測試，沒有實機跑過）
 - [ ] 階段九：驗證 24GB 那階的 MoE 選型（`gemma4:26b-a4b-it-qat` 對比 `31b-it-qat` 的速度與品質），需要一台 24GB 顯卡的機器
-- [ ] 階段十：讓腳本處理 `opencode.jsonc`（偵測同目錄的 `.json`／`.jsonc` 並存、`-Check` 兩份都讀、寫入前警告重複的 provider 定義）
+- [x] 階段十：讓腳本處理 `opencode.jsonc`（盤點 `.json`／`.jsonc` 並存、`-Check` 兩份都讀並揪出死項目、寫入前警告重複的 provider 定義）；測試 59 → 72 項
 
 技能刻意**不**同步到全域技能目錄，見下方「技術決策」。
 
@@ -111,8 +111,13 @@ Intel Mac 沒有 Ollama 可用的 GPU 加速（Metal 後端只對 Apple Silicon 
 **必須用 PowerShell 7**
 腳本是 UTF-8 無 BOM，5.1 會用系統 ANSI 解讀而在 parse 階段失敗；而且 `ConvertFrom-Json -AsHashtable` 在 5.1 不存在，設定合併會直接壞掉。腳本有 `#requires -Version 7.0`。
 
-**OpenCode 會合併 `opencode.json` 與 `opencode.jsonc`，腳本目前只認前者**
-兩個檔案同時存在時 OpenCode 兩份都讀、合併生效（已實測：`opencode models ollama` 同時列出兩邊定義的模型）。`setup-gemma.ps1` 的 `-ConfigPath` 預設只指向 `opencode.json`，造成兩個後果：`.jsonc` 裡若有舊的 ollama 模型定義會變成清單裡的重複／死項目；而 `-Check` 只看 `.json`，會把「`.jsonc` 有 provider」誤報成「沒有 ollama provider」。腳本尚未處理這件事，在有 `.jsonc` 的機器上要手動檢查。
+**OpenCode 會合併 `opencode.json` 與 `opencode.jsonc`**
+兩個檔案同時存在時 OpenCode 兩份都讀、合併生效（已實測：`opencode models ollama` 同時列出兩邊定義的模型）。腳本用 `Resolve-OpenCodeConfig` 盤點同目錄的兩個檔名，`-Check` 逐份回報、並比對 `ollama list` 指出「設定裡有但 Ollama 沒有」的死項目；寫入前若發現另一份也定義了 `provider.ollama`，會警告那份不會被清掉、要手動移除。
+
+寫入目標的規則：明確給 `-ConfigPath` 就寫那份（盤點與警告照做）；沒給時只有 `.jsonc` 存在就寫 `.jsonc`，其餘一律寫 `.json`。
+
+**單一設定檔請用 `.json`，不要用 `.jsonc`**
+腳本寫回時走 `ConvertTo-Json`，**註解一定會被清掉** —— `.jsonc` 唯一的優勢因此不成立。腳本寫入 `.jsonc` 時會先警告這件事。PowerShell 7 的 `ConvertFrom-Json` 讀得動註解與尾逗號（5.1 不行，這是另一個必須用 pwsh 7 的理由）。
 
 **設定合併不覆寫整份檔案**
 `opencode.json` 裡還有 mcp、permission、experimental 等使用者既有設定。腳本用 `ConvertFrom-Json -AsHashtable` 讀進來、只改 `provider.ollama` 這一支、再寫回，並在寫入前備份成 `opencode.json.bak-<時間戳>`（同一秒重跑會自動加序號，不覆蓋前一份）。
@@ -123,7 +128,7 @@ Intel Mac 沒有 Ollama 可用的 GPU 加速（Metal 後端只對 Apple Silicon 
 pwsh -NoProfile -File .\tests\test-setup-gemma.ps1
 ```
 
-隔離測試 59 項：不連網、不安裝、不下載模型、不動使用者環境變數、不碰真正的 `opencode.json`。做法是用 AST 把腳本裡的函式抽出來單獨定義，避開主流程。涵蓋語法／編碼、Windows 與 Apple Silicon 兩條選型路徑、顯卡篩選規則、LaunchAgent 的 plist 是否為合法 XML、設定合併與備份。
+隔離測試 72 項：不連網、不安裝、不下載模型、不動使用者環境變數、不碰真正的 `opencode.json`。做法是用 AST 把腳本裡的函式抽出來單獨定義，避開主流程。涵蓋語法／編碼、Windows 與 Apple Silicon 兩條選型路徑、顯卡篩選規則、LaunchAgent 的 plist 是否為合法 XML、設定合併與備份、以及 `.json`／`.jsonc` 並存時的解析與寫入目標。
 
 macOS 的實際系統呼叫（`launchctl`、`osascript`、`brew`）在 Windows 上測不到，所以把 plist 的 XML 組裝抽成 `New-MacLaunchAgentXml` 獨立函式，至少讓最容易出跳脫錯誤的那段可以被驗證。
 

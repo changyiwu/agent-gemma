@@ -61,7 +61,7 @@ pwsh -NoProfile -File "<本技能資料夾>\setup-gemma.ps1"
 pwsh -NoProfile -File "<本技能資料夾>\setup-gemma.ps1" -Check
 ```
 
-會列出 ollama 版本、服務狀態、三個 `OLLAMA_*` 環境變數、OpenCode 裡每個模型的 `limit.context`，以及 `ollama ps` 的實際載入狀態。
+會列出 ollama 版本、服務狀態、三個 `OLLAMA_*` 環境變數、**每一份**設定檔（`.json` 與 `.jsonc`）裡各模型的 `limit.context`、設定裡有但 Ollama 上沒有的死項目，以及 `ollama ps` 的實際載入狀態。
 
 ## 參數
 
@@ -72,7 +72,7 @@ pwsh -NoProfile -File "<本技能資料夾>\setup-gemma.ps1" -Check
 | `-Model <tag>` | 指定模型，跳過自動選型 |
 | `-Context <n>` | 指定上下文長度，跳過自動建議 |
 | `-KvCache q8_0` | KV cache 量化，相同 VRAM 可塞下約兩倍上下文 |
-| `-ConfigPath <path>` | 改寫別的設定檔（預設 `~/.config/opencode/opencode.json`） |
+| `-ConfigPath <path>` | 改寫別的設定檔（預設 `~/.config/opencode/opencode.json`；同目錄的 `.jsonc` 也會被盤點並警告） |
 | `-SkipInstall` | 已自行裝好 Ollama 時跳過安裝 |
 | `-Yes` | 全程不詢問 |
 
@@ -93,7 +93,7 @@ Apple Silicon 是統一記憶體，腳本先換算成「等效 VRAM」（36GB �
 沒有可用 GPU 時，改依系統記憶體走 CPU 路徑（很慢，只建議拿來確認流程能通）。
 表格寫在 `setup-gemma.ps1` 的 `$GpuProfiles` / `$CpuProfiles`，要調整就改那裡。
 
-## 兩個一定要講清楚的重點
+## 三個一定要講清楚的重點
 
 **1. 上下文要在兩個地方各設一次，缺一不可。**
 
@@ -102,7 +102,16 @@ Apple Silicon 是統一記憶體，腳本先換算成「等效 VRAM」（36GB �
 
 兩者作用範圍相反：`OLLAMA_CONTEXT_LENGTH` 是全域（Ollama 上每個模型都吃），`limit.context` 是逐一模型。要逐一模型控制實際上下文，只能用 Modelfile 的 `PARAMETER num_ctx`（`num_ctx` 無法從 OpenAI 相容端點傳入，已實測）。
 
-**2. `contextLength` 不是合法欄位。**
+**2. 設定檔可能有兩份，OpenCode 會合併讀取。**
+
+`~/.config/opencode/` 底下的 `opencode.json` 與 `opencode.jsonc` **兩份都會被讀進來合併生效**。腳本會盤點兩份並在以下情況警告，看到就要處理：
+
+- 兩份都定義了 `provider.ollama` → 腳本只寫其中一份，另一份的舊模型定義會留在模型清單裡。**要手動移除那一份的 `provider.ollama`**，否則使用者會看到重複或選了會失敗的項目。
+- `-Check` 指出「模型 X 在設定裡但 Ollama 沒有這顆」→ 那是刪過模型留下的死項目，建議一併清掉。
+
+建議統一用 `opencode.json` 一份。腳本寫回時走 `ConvertTo-Json`，`.jsonc` 的註解一定會被清掉，留 `.jsonc` 沒有意義。
+
+**3. `contextLength` 不是合法欄位。**
 
 OpenCode 的 schema 只認 `limit: { context, output }`。網路上不少舊教學寫 `contextLength`，那個會被靜默忽略。腳本會自動把既有設定裡的 `contextLength` 清掉。
 
@@ -123,6 +132,7 @@ OpenCode 的 schema 只認 `limit: { context, output }`。網路上不少舊教�
 | 重開機後上下文掉回 4096（macOS） | LaunchAgent 沒建立或被移除，跑 `-Check` 會指出 |
 | AMD 顯卡沒吃到 GPU | Ollama 的 ROCm 只支援部分 gfx 型號，不支援時會自動退回 CPU |
 | 回應速度可接受但品質不夠 | 往上一階換模型，或改用 `-it-q8_0` 版本 |
+| 模型清單有已刪掉／重複的項目 | 設定分散在 `opencode.json` 與 `opencode.jsonc` 兩份。跑 `-Check`，依警告手動移除多餘那份的 `provider.ollama` |
 
 ## 測試
 
