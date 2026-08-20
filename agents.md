@@ -25,10 +25,11 @@
 - [x] 階段二：完成 `setup-gemma.ps1`（硬體偵測、選型表、安裝、拉模型、環境變數、設定合併、煙霧測試）
 - [x] 階段三：完成隔離測試 `tests/test-setup-gemma.ps1`（不連網不改系統）
 - [x] 階段四：完成 `SKILL.md` 與 README
-- [x] 階段五：在這台電腦實跑完整流程並驗證（CONTEXT 131072、100% GPU）
+- [x] 階段五：在 Windows 實機跑完整流程並驗證兩個 VRAM 階層（16GB→131072、8GB→32768，皆 100% GPU）
 - [x] 階段六：加入 Apple Silicon macOS 支援；測試擴充到 59 項
 - [x] 階段七：專案初始化三層級（L1 本地、L2 公開 GitHub、L3 Obsidian）
 - [ ] 階段八：在實體 Mac 上驗證 macOS 路徑（目前只有邏輯與 plist 格式測試，沒有實機跑過）
+- [ ] 階段九：驗證 24GB 那階的 MoE 選型（`gemma4:26b-a4b-it-qat` 對比 `31b-it-qat` 的速度與品質），需要一台 24GB 顯卡的機器
 
 技能刻意**不**同步到全域技能目錄，見下方「技術決策」。
 
@@ -65,7 +66,13 @@ OpenCode 的 `provider.<id>.models.<tag>` schema 只認 `limit: { context, outpu
 標稱 16GB 的卡實際回報約 15.9 GB，24GB 約 23.6 GB。所以 `MinVram` 用 15 / 23 / 31 / 46，不用整數標稱值。
 
 **16GB 那階的 131072 是實測值，不是估的**
-在 RTX 5060 Ti 16GB 上用 `nvidia-smi` 量 `gemma4:12b`：4096 佔 8181 MiB、65536 佔 9550 MiB、131072 佔 10291 MiB、262144 佔 12467 MiB，全程 100% GPU。Gemma 的滑動視窗注意力讓 KV cache 幾乎不隨上下文線性成長，從 4K 到 131K 只多 2.1 GB。取 131072 而非上限，是留約 3.7 GB 給桌面環境波動。其他 VRAM 階層還沒實測，數字偏保守。
+在 RTX 5060 Ti 16GB 上用 `nvidia-smi` 量 `gemma4:12b`：4096 佔 8181 MiB、65536 佔 9550 MiB、131072 佔 10291 MiB、262144 佔 12467 MiB，全程 100% GPU。Gemma 的滑動視窗注意力讓 KV cache 幾乎不隨上下文線性成長，從 4K 到 131K 只多 2.1 GB。取 131072 而非上限，是留約 3.7 GB 給桌面環境波動。8GB 那階也已實測（見下），其餘階層還沒實測，數字偏保守。
+
+**8GB 那階的 32768 也是實測值**
+在 RTX 5060 **Laptop** GPU 8GB 上跑 `gemma4:e4b-it-qat`：`ollama ps` 顯示 CONTEXT 32768、100% GPU，載入只佔 3.1 GB，留約 4.9 GB 餘裕。這台同時有 AMD Radeon 610M 內顯（0.5 GB），顯卡篩選規則正確挑到 NVIDIA 那張，沒被內顯干擾。餘裕看起來還能往上調上下文，但沒實測過更高值，維持 32768。
+
+**選型表的「下載大小」不等於顯存佔用**
+`gemma4:e4b-it-qat` 下載後 `ollama list` 顯示 6.1 GB，實際載入 `ollama ps` 只佔 3.1 GB。選型表的 `SizeGB` 是**磁碟下載大小**，用來預告要下載多久、要留多少硬碟，不能拿來推算塞不塞得進 VRAM。同理，同名模型的非 QAT 版本（`gemma4:e4b`，9.6 GB）在 8GB 卡上會部分掉到 CPU，QAT 版本才進得去 —— 8GB 這階一定要用 `-it-qat`。
 
 **兩個上下文設定的作用範圍相反**
 `opencode.json` 的 `limit.context` 掛在 `provider.ollama.models.<tag>` 底下，只影響那一個模型；`OLLAMA_CONTEXT_LENGTH` 是 Ollama 伺服器的環境變數，**所有**經由 Ollama 跑的模型都吃它。
