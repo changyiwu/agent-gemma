@@ -30,6 +30,7 @@
 - [x] 階段七：專案初始化三層級（L1 本地、L2 公開 GitHub、L3 Obsidian）
 - [ ] 階段八：在實體 Mac 上驗證 macOS 路徑（目前只有邏輯與 plist 格式測試，沒有實機跑過）
 - [ ] 階段九：驗證 24GB 那階的 MoE 選型（`gemma4:26b-a4b-it-qat` 對比 `31b-it-qat` 的速度與品質），需要一台 24GB 顯卡的機器
+- [ ] 階段十：讓腳本處理 `opencode.jsonc`（偵測同目錄的 `.json`／`.jsonc` 並存、`-Check` 兩份都讀、寫入前警告重複的 provider 定義）
 
 技能刻意**不**同步到全域技能目錄，見下方「技術決策」。
 
@@ -109,6 +110,9 @@ Intel Mac 沒有 Ollama 可用的 GPU 加速（Metal 後端只對 Apple Silicon 
 
 **必須用 PowerShell 7**
 腳本是 UTF-8 無 BOM，5.1 會用系統 ANSI 解讀而在 parse 階段失敗；而且 `ConvertFrom-Json -AsHashtable` 在 5.1 不存在，設定合併會直接壞掉。腳本有 `#requires -Version 7.0`。
+
+**OpenCode 會合併 `opencode.json` 與 `opencode.jsonc`，腳本目前只認前者**
+兩個檔案同時存在時 OpenCode 兩份都讀、合併生效（已實測：`opencode models ollama` 同時列出兩邊定義的模型）。`setup-gemma.ps1` 的 `-ConfigPath` 預設只指向 `opencode.json`，造成兩個後果：`.jsonc` 裡若有舊的 ollama 模型定義會變成清單裡的重複／死項目；而 `-Check` 只看 `.json`，會把「`.jsonc` 有 provider」誤報成「沒有 ollama provider」。腳本尚未處理這件事，在有 `.jsonc` 的機器上要手動檢查。
 
 **設定合併不覆寫整份檔案**
 `opencode.json` 裡還有 mcp、permission、experimental 等使用者既有設定。腳本用 `ConvertFrom-Json -AsHashtable` 讀進來、只改 `provider.ollama` 這一支、再寫回，並在寫入前備份成 `opencode.json.bak-<時間戳>`（同一秒重跑會自動加序號，不覆蓋前一份）。
