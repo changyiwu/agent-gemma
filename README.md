@@ -73,10 +73,18 @@ M 系列是統一記憶體，CPU 和 GPU 共用同一塊。Metal 能取用的上
 | 8 GB | 70% | 5.6 GB | `gemma4:e2b-it-qat` | 16384 |
 | 16 GB | 70% | 11.2 GB | `gemma4:12b` | 32768 |
 | 24 GB | 70% | 16.8 GB | `gemma4:12b` | 131072 |
+| 32 GB | 70% | 22.4 GB | `gemma4:12b` | 131072 |
 | 36 GB | 70% | 25.2 GB | `gemma4:26b-a4b-it-qat` | 32768 |
+| 48 GB | 80% | 38.4 GB | `gemma4:31b-it-qat` | 65536 |
 | 64 GB | 80% | 51.2 GB | `gemma4:31b-it-q8_0` | 131072 |
 
 寧可低估也不要載到一半才發現爆掉。覺得太保守就用 `-Context` 或 `-Model` 自己指定。
+
+**想跑 26B MoE 的話，自動選型的窗口只有 36–40 GB**：32 GB 差 0.6 GB 沒跨過門檻（實際上跑得動，權重才 16 GB），48 GB 以上則會跳到 31B 密集模型。這兩種情形都得手動指定：
+
+```bash
+pwsh -NoProfile -File ./setup-gemma.ps1 -Model gemma4:26b-a4b-it-qat -Context 32768
+```
 
 要調整就改 `gemma-setup/setup-gemma.ps1` 裡的 `$GpuProfiles` / `$CpuProfiles`。
 
@@ -107,6 +115,8 @@ M 系列是統一記憶體，CPU 和 GPU 共用同一塊。Metal 能取用的上
 **Ollama 端 — `OLLAMA_CONTEXT_LENGTH`**
 
 Ollama 0.30 之後預設值是「依 VRAM 動態決定」：未滿 23 GB 的機器一律只給 **4096**，23 GB 以上給 32768，47 GB 以上給 262144。所以一台 16 GB 顯卡的電腦如果沒設這個變數，實際跑起來就是 4K 上下文——OpenCode 那邊寫多大都沒用，工具呼叫會頻繁失敗、對話很快就斷。
+
+> ⚠️ **設了環境變數也不保證生效。** Ollama 0.32 的**桌面 app** 把自己的 context length 設定（出廠預設 32768）存在 `db.sqlite`，啟動 server 時會拿它覆蓋環境變數，而且完全沒有提示 —— 重開機後又會再蓋一次。腳本會比對 server log 記的實際注入值並在不一致時報警。修法是把桌面 app 設定裡的 context length 也改成同一個值，或關掉桌面 app 改用 `ollama serve`。
 
 Windows 設使用者環境變數即可。**macOS 麻煩一點**：要用 `launchctl setenv`，而且它活不過重開機 —— 所以腳本還會在 `~/Library/LaunchAgents/ai.ollama.env.plist` 寫一個登入時自動重設的 LaunchAgent，否則你某天重開機後上下文會悄悄掉回 4096 而毫無徵兆。要移除：
 
@@ -142,7 +152,7 @@ PARAMETER num_ctx 16384
 | 參數 | 用途 |
 |------|------|
 | `-Plan` | 只偵測與建議，不改動任何東西 |
-| `-Check` | 只檢查現況（含 `ollama ps` 的實際上下文） |
+| `-Check` | 只檢查現況（含 `ollama ps` 的實際上下文，以及環境變數是否真的被 Ollama 吃到） |
 | `-Model <tag>` | 指定模型，跳過自動選型 |
 | `-Context <n>` | 指定上下文長度，跳過自動建議 |
 | `-KvCache q8_0` | KV cache 量化，相同 VRAM 可塞下約兩倍上下文，品質損失很小 |
@@ -163,7 +173,8 @@ pwsh -NoProfile -File ./.opencode/skills/gemma-setup/setup-gemma.ps1 -Model gemm
 | 工具呼叫一直失敗、對話很快就斷 | 上下文太小。跑 `-Check` 看 `OLLAMA_CONTEXT_LENGTH` 與 `ollama ps` 的 CONTEXT 欄位 |
 | `ollama ps` 的 PROCESSOR 顯示 CPU 或 CPU/GPU 混合 | 模型加上下文超出 VRAM。改小 `-Context`，或加 `-KvCache q8_0` |
 | 重開機後上下文變回 4096（macOS） | LaunchAgent 沒建立或被移除。跑 `-Check` 會告訴你 |
-| 改了環境變數卻沒效果 | Ollama 服務要重啟（腳本會做） |
+| `-Check` 說「上下文對不上」 | Ollama 桌面 app 用自己的 GUI 設定蓋掉了環境變數。到 app 的 Settings 把 context length 改成同一個值，或改用 `ollama serve` |
+| 改了環境變數卻沒效果 | Ollama 服務要重啟（腳本會做）。若重啟了還是沒效果，看上一列 |
 | AMD 顯卡沒吃到 GPU | Ollama 的 ROCm 只支援部分 gfx 型號，不支援時會自動退回 CPU |
 | 腳本一開就報語法錯誤 | 用到了 Windows PowerShell 5.1。必須用 `pwsh`（PowerShell 7） |
 | Intel Mac 被擋下 | 沒有 Ollama 可用的 GPU 加速，不支援 |
@@ -184,7 +195,7 @@ pwsh -NoProfile -File ./.opencode/skills/gemma-setup/setup-gemma.ps1 -Model gemm
 pwsh -NoProfile -File ./tests/test-setup-gemma.ps1
 ```
 
-72 項，涵蓋語法與編碼、Windows 與 Apple Silicon 兩條選型路徑、顯卡篩選、LaunchAgent 的 plist 是否為合法 XML、以及設定合併與備份、`.json`／`.jsonc` 並存的處理。
+89 項，涵蓋語法與編碼、Windows 與 Apple Silicon 兩條選型路徑、顯卡篩選、LaunchAgent 的 plist 是否為合法 XML、設定合併與備份、`.json`／`.jsonc` 並存的處理，以及 server log 的上下文解析與不一致偵測。
 
 ## 資料夾結構
 

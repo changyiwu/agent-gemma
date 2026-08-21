@@ -90,6 +90,8 @@ pwsh -NoProfile -File "<本技能資料夾>\setup-gemma.ps1" -Check
 
 Apple Silicon 是統一記憶體，腳本先換算成「等效 VRAM」（36GB 以下取 70%、以上取 80%）再套用同一張表。例如 16GB Mac → 11.2GB → `gemma4:12b` @ 32768；64GB Mac → 51.2GB → `gemma4:31b-it-q8_0` @ 131072。
 
+想跑 26B MoE 的話，自動選型的窗口只有 **36–40GB**：32GB 差 0.6GB 沒跨過門檻（實際上跑得動），48GB 以上會跳到 31B 密集模型。兩種情形都要 `-Model gemma4:26b-a4b-it-qat` 手動指定。
+
 沒有可用 GPU 時，改依系統記憶體走 CPU 路徑（很慢，只建議拿來確認流程能通）。
 表格寫在 `setup-gemma.ps1` 的 `$GpuProfiles` / `$CpuProfiles`，要調整就改那裡。
 
@@ -101,6 +103,8 @@ Apple Silicon 是統一記憶體，腳本先換算成「等效 VRAM」（36GB �
 - **OpenCode 端**：`opencode.json` 裡的 `limit.context`。
 
 兩者作用範圍相反：`OLLAMA_CONTEXT_LENGTH` 是全域（Ollama 上每個模型都吃），`limit.context` 是逐一模型。要逐一模型控制實際上下文，只能用 Modelfile 的 `PARAMETER num_ctx`（`num_ctx` 無法從 OpenAI 相容端點傳入，已實測）。
+
+**而且設了環境變數還不一定生效。** Ollama 0.32 的桌面 app 會拿自己 GUI 設定裡的 context length（出廠預設 32768）覆蓋環境變數，沒有任何提示，重開機後再蓋一次。腳本會比對 server log 記的實際注入值，不一致時印出「上下文對不上」並給修法。**看到這個警告一定要處理**，否則設定看起來成功、實際跑的是別的值 —— 到 Ollama 桌面 app 的 Settings 把 context length 改成同一個值，或關掉桌面 app 改用 `ollama serve`。
 
 **2. 設定檔可能有兩份，OpenCode 會合併讀取。**
 
@@ -130,6 +134,7 @@ OpenCode 的 schema 只認 `limit: { context, output }`。網路上不少舊教�
 | `ollama ps` 的 PROCESSOR 顯示 CPU | 模型加上下文超出 VRAM。改小 `-Context`，或用 `-KvCache q8_0` |
 | 改了環境變數卻沒效果 | Ollama 服務要重啟（腳本會做） |
 | 重開機後上下文掉回 4096（macOS） | LaunchAgent 沒建立或被移除，跑 `-Check` 會指出 |
+| `-Check` 說「上下文對不上」 | Ollama 桌面 app 的 GUI 設定蓋掉了環境變數。到 app 的 Settings 改成同一個值，或改用 `ollama serve` |
 | AMD 顯卡沒吃到 GPU | Ollama 的 ROCm 只支援部分 gfx 型號，不支援時會自動退回 CPU |
 | 回應速度可接受但品質不夠 | 往上一階換模型，或改用 `-it-q8_0` 版本 |
 | 模型清單有已刪掉／重複的項目 | 設定分散在 `opencode.json` 與 `opencode.jsonc` 兩份。跑 `-Check`，依警告手動移除多餘那份的 `provider.ollama` |

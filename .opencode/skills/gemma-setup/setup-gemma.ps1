@@ -345,6 +345,72 @@ function Install-GemmaModel {
     Write-Ok "模型 $Tag 下載完成"
 }
 
+function Get-OllamaLogDir {
+    if ($IsMacOS) { return (Join-Path $HOME '.ollama/logs') }
+    return (Join-Path $env:LOCALAPPDATA 'Ollama')
+}
+
+function Read-ContextFromLogText {
+    <#  從 Ollama server log 取出最後一次啟動時「真正注入 server」的上下文長度。
+        log 每次啟動會寫一行 msg="server config" env="map[... OLLAMA_CONTEXT_LENGTH:131072 ...]"。
+        抽成吃字串的純函式，是為了能在沒有 Ollama 的機器上測。 #>
+    param([string] $Text)
+
+    if (-not $Text) { return $null }
+    $m = [regex]::Matches($Text, 'OLLAMA_CONTEXT_LENGTH:(\d+)')
+    if ($m.Count -eq 0) { return $null }
+    return [int] $m[$m.Count - 1].Groups[1].Value
+}
+
+function Get-OllamaRuntimeContext {
+    <#  環境變數只是「我們希望的值」，這裡讀的才是「跑著的 server 實際拿到的值」。
+        兩者會不一致 —— Ollama 0.32 的桌面 app 用自己 GUI 設定裡的 context length
+        覆蓋環境變數，完全沒有提示，重開機後又會再蓋一次。找不到 log 就回 $null。 #>
+    $dir = Get-OllamaLogDir
+    if (-not (Test-Path $dir)) { return $null }
+
+    # server.log 是當前的，server-1.log 以後是輪替過的舊檔；由新到舊找第一個讀得到值的
+    $logs = @(Get-ChildItem -Path $dir -Filter 'server*.log' -ErrorAction SilentlyContinue |
+                Sort-Object LastWriteTime -Descending)
+    foreach ($log in $logs) {
+        try { $v = Read-ContextFromLogText -Text (Get-Content -Path $log.FullName -Raw -ErrorAction Stop) }
+        catch { continue }
+        if ($v) { return $v }
+    }
+    return $null
+}
+
+function Write-ContextMismatchWarning {
+    <#  持久化設定與實際生效值對不上時的說明與修法。
+        這是最難查的那種故障：腳本每一步都回報成功，實際跑的卻是另一個值。 #>
+    param([int] $Persisted, [int] $Runtime)
+
+    $where = if ($IsMacOS) { 'Ollama.app 的設定畫面' } else { 'Ollama 桌面 app（工作列圖示）的 Settings' }
+    Write-Warn2 "上下文對不上：環境變數是 $Persisted，但跑著的 Ollama 實際用 $Runtime"
+    Write-Info  '  Ollama 0.32 的桌面 app 會拿自己 GUI 設定裡的 context length 覆蓋環境變數，且不會提示。'
+    Write-Info  "  修法一：到 $where 把 context length 也改成 $Persisted（一勞永逸，重開機也不會跑掉）。"
+    Write-Info  '  修法二：關掉桌面 app，改用 ollama serve 啟動服務（環境變數才會是老大）。'
+}
+
+function Test-RuntimeContext {
+    <# 比對持久化設定與實際生效值並回報。回傳 $true 表示一致或無從判斷。 #>
+    param([string] $Persisted)
+
+    $runtime = Get-OllamaRuntimeContext
+    if (-not $runtime) { return $true }   # 讀不到 log 就不下結論
+
+    if (-not $Persisted) {
+        Write-Info "跑著的 Ollama 實際使用的上下文：$runtime（不是來自環境變數，多半是桌面 app 的 GUI 設定）"
+        return $true
+    }
+    if ([int] $Persisted -ne $runtime) {
+        Write-ContextMismatchWarning -Persisted ([int] $Persisted) -Runtime $runtime
+        return $false
+    }
+    Write-Ok "實際生效的上下文：$runtime（與環境變數一致）"
+    return $true
+}
+
 function Get-PersistentEnv {
     <# 讀取「跨行程可見」的環境變數：Windows 是使用者環境變數，macOS 是 launchctl。 #>
     param([string] $Name)
@@ -645,6 +711,9 @@ function Show-Status {
         if ($v) { Write-Ok "$n = $v" } else { Write-Warn2 "$n $($envHints[$n])" }
     }
 
+    # 環境變數設對了不代表 Ollama 真的吃到 —— 桌面 app 會用 GUI 設定蓋掉它
+    $null = Test-RuntimeContext -Persisted (Get-PersistentEnv -Name 'OLLAMA_CONTEXT_LENGTH')
+
     if ($IsMacOS) {
         $plist = Join-Path $HOME 'Library/LaunchAgents/ai.ollama.env.plist'
         if (Test-Path $plist) { Write-Ok 'LaunchAgent 存在，設定可活過重開機' }
@@ -760,6 +829,13 @@ if (Confirm-Step "要更新 $($resolved.Target) 嗎？（會先自動備份）")
 Write-Step '驗證'
 Test-Setup -Tag $tag
 
-Write-Host "`n完成。" -ForegroundColor Magenta
-Write-Info '上下文由 Ollama 伺服器決定，腳本已重啟它並套用設定，上面的 CONTEXT 欄位就是實際生效值。'
-Write-Info '若日後自行從舊的終端機執行 ollama serve，記得那個 shell 可能還沒有新的環境變數 — 開新終端機即可。'
+# 每一步都回報成功、實際生效的卻是別的值 —— 這是最難查的故障，所以收尾前一定要對一次
+$ctxOk = Test-RuntimeContext -Persisted (Get-PersistentEnv -Name 'OLLAMA_CONTEXT_LENGTH')
+
+if ($ctxOk) {
+    Write-Host "`n完成。" -ForegroundColor Magenta
+    Write-Info '上下文由 Ollama 伺服器決定，腳本已重啟它並套用設定，上面的 CONTEXT 欄位就是實際生效值。'
+    Write-Info '若日後自行從舊的終端機執行 ollama serve，記得那個 shell 可能還沒有新的環境變數 — 開新終端機即可。'
+} else {
+    Write-Host "`n設定已寫入，但實際生效的上下文不是預期值 —— 請照上面的修法處理後再跑一次 -Check。" -ForegroundColor Yellow
+}

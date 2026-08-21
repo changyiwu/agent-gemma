@@ -291,6 +291,88 @@ Assert-True ((Read-OpenCodeConfig -Path $dualJsonc)['provider']['ollama']['model
 
 Remove-Item $dualDir -Recurse -Force
 
+# ---- 實際生效的上下文（server log 解析） --------------------------------
+
+Write-Host "`n[9] Ollama server log 的實際上下文" -ForegroundColor Cyan
+
+# 真實 log 的樣子：一長串 env map，值夾在其他變數中間
+$realLine = 'time=2026-08-21T21:43:17.883+08:00 level=INFO source=routes.go:1933 msg="server config" ' +
+            'env="map[CUDA_VISIBLE_DEVICES: OLLAMA_CONTEXT_LENGTH:32768 OLLAMA_DEBUG:INFO ' +
+            'OLLAMA_FLASH_ATTENTION:false OLLAMA_HOST:http://127.0.0.1:11434]"'
+Assert-Equal 32768 (Read-ContextFromLogText -Text $realLine) '從真實格式的 log 行取出上下文'
+
+# 同一份 log 裡有多次啟動時要取最後一次 —— 前面的都是已經被取代的舊 server
+$multi = @(
+    'msg="server config" env="map[OLLAMA_CONTEXT_LENGTH:4096 OLLAMA_DEBUG:INFO]"'
+    'msg="server config" env="map[OLLAMA_CONTEXT_LENGTH:32768 OLLAMA_DEBUG:INFO]"'
+    'msg="server config" env="map[OLLAMA_CONTEXT_LENGTH:131072 OLLAMA_DEBUG:INFO]"'
+) -join "`n"
+Assert-Equal 131072 (Read-ContextFromLogText -Text $multi) '多次啟動時取最後一次的值'
+
+Assert-True ($null -eq (Read-ContextFromLogText -Text 'msg="server config" env="map[OLLAMA_DEBUG:INFO]"')) 'log 裡沒有這個變數時回 $null'
+Assert-True ($null -eq (Read-ContextFromLogText -Text ''))   '空字串回 $null'
+Assert-True ($null -eq (Read-ContextFromLogText -Text $null)) '$null 輸入回 $null'
+
+# vram-based default context 那行也帶數字，不能被誤抓成生效值
+$decoy = 'msg="vram-based default context" total_vram="15.9 GiB" default_num_ctx=4096'
+Assert-True ($null -eq (Read-ContextFromLogText -Text $decoy)) '不會誤抓 vram-based default context 的數字'
+
+# 這台踩到的情境：環境變數 131072、桌面 app 用 32768 起 server
+$mismatchOut = & {
+    $script:lines = @()
+    function Write-Warn2 { param([string]$m) $script:lines += "WARN $m" }
+    function Write-Info  { param([string]$m) $script:lines += "INFO $m" }
+    function Write-Ok    { param([string]$m) $script:lines += "OK $m" }
+    function Get-OllamaRuntimeContext { 32768 }
+    $r = Test-RuntimeContext -Persisted '131072'
+    [pscustomobject]@{ Result = $r; Lines = $script:lines }
+}
+Assert-True (-not $mismatchOut.Result)                                  '設定與實際值不一致時回 $false'
+Assert-True (($mismatchOut.Lines -join ' ') -match '131072')            '不一致的警告會列出環境變數的值'
+Assert-True (($mismatchOut.Lines -join ' ') -match '32768')             '不一致的警告會列出實際生效的值'
+Assert-True (($mismatchOut.Lines -join ' ') -match 'context length')    '不一致的警告會指出桌面 app 的設定'
+
+$matchOut = & {
+    $script:lines = @()
+    function Write-Warn2 { param([string]$m) $script:lines += "WARN $m" }
+    function Write-Info  { param([string]$m) $script:lines += "INFO $m" }
+    function Write-Ok    { param([string]$m) $script:lines += "OK $m" }
+    function Get-OllamaRuntimeContext { 131072 }
+    $r = Test-RuntimeContext -Persisted '131072'
+    [pscustomobject]@{ Result = $r; Lines = $script:lines }
+}
+Assert-True ($matchOut.Result)                              '設定與實際值一致時回 $true'
+Assert-True (($matchOut.Lines -join ' ') -notmatch 'WARN')  '一致時不會發出警告'
+
+# 讀不到 log（沒裝 Ollama、或還沒跑過）就不下結論，不能誤判成失敗
+$noLogOut = & {
+    function Write-Warn2 { param([string]$m) }
+    function Write-Info  { param([string]$m) }
+    function Write-Ok    { param([string]$m) }
+    function Get-OllamaRuntimeContext { $null }
+    Test-RuntimeContext -Persisted '131072'
+}
+Assert-True $noLogOut '讀不到 log 時不下結論（回 $true）'
+
+# 環境變數沒設、但 server 有值 —— 那個值必然來自別處（GUI），要講清楚
+$noEnvOut = & {
+    $script:lines = @()
+    function Write-Warn2 { param([string]$m) $script:lines += "WARN $m" }
+    function Write-Info  { param([string]$m) $script:lines += "INFO $m" }
+    function Write-Ok    { param([string]$m) $script:lines += "OK $m" }
+    function Get-OllamaRuntimeContext { 32768 }
+    $r = Test-RuntimeContext -Persisted ''
+    [pscustomobject]@{ Result = $r; Lines = $script:lines }
+}
+Assert-True ($noEnvOut.Result)                                   '環境變數未設時不算失敗'
+Assert-True (($noEnvOut.Lines -join ' ') -match '不是來自環境變數') '環境變數未設時會點出值的來源不是環境變數'
+
+# 路徑要跟著平台走，不能寫死 Windows
+$logDir = Get-OllamaLogDir
+Assert-True ([bool] $logDir) 'Get-OllamaLogDir 有回傳路徑'
+if ($IsWindows) { Assert-True ($logDir -match 'Ollama')        'Windows 的 log 目錄指向 Ollama' }
+else            { Assert-True ($logDir -match '\.ollama/logs') 'macOS 的 log 目錄指向 ~/.ollama/logs' }
+
 # ---- 結果 ---------------------------------------------------------------
 
 Write-Host ''
