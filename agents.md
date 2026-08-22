@@ -28,7 +28,7 @@
 - [x] 階段五：在 Windows 實機跑完整流程並驗證兩個 VRAM 階層（16GB→131072、8GB→32768，皆 100% GPU）
 - [x] 階段六：加入 Apple Silicon macOS 支援；測試擴充到 59 項
 - [x] 階段七：專案初始化三層級（L1 本地、L2 公開 GitHub、L3 Obsidian）
-- [ ] 階段八：在實體 Mac 上驗證 macOS 路徑（目前只有邏輯與 plist 格式測試，沒有實機跑過）
+- [ ] 階段八：在實體 Mac 上驗證 macOS 路徑（目前只有邏輯與 plist 格式測試，沒有實機跑過）。範圍在 2026-08-21 擴大：除了 LaunchAgent 與等效 VRAM 比例，還要驗 **MLX 後端**（Ollama 在 Apple Silicon 是 GGUF／MLX 雙後端，選型表只走了 GGUF 那條）與 macOS 版桌面 app 是否也有 GUI 覆蓋上下文的行為
 - [~] 階段九：驗證 24GB 那階的 MoE 選型。**已在 16GB 卡上用 CPU offload 實測 `gemma4:26b-a4b-it-qat`**（見下方「MoE 實測」），結論與原假設相反：更快，但沒有更會自我檢查。**尚缺**：對比 `31b-it-qat`（沒下載）、24GB 卡全 GPU 的表現、Apple Silicon 路徑（併入階段八）
 - [x] 階段十：讓腳本處理 `opencode.jsonc`（盤點 `.json`／`.jsonc` 並存、`-Check` 兩份都讀並揪出死項目、寫入前警告重複的 provider 定義）；測試 59 → 72 項
 - [x] 階段十一：揪出 Ollama 桌面 app 的 GUI 設定覆蓋 `OLLAMA_CONTEXT_LENGTH`（腳本比對 server log 的實際注入值，不一致就報警並給修法）；測試 72 → 89 項
@@ -166,6 +166,31 @@ Intel Mac 沒有 Ollama 可用的 GPU 加速（Metal 後端只對 Apple Silicon 
 
 **Apple Silicon 的「等效 VRAM」是估的**
 統一記憶體由 CPU/GPU 共用，Metal 的可取用上限看 `iogpu.wired_limit_mb`，未調整時約為總記憶體的 65~75%。腳本取保守比例（36GB 以下 70%、以上 80%）換算後套用同一張 GPU 選型表。這是啟發式，不是量測值 —— 真的在 Mac 上跑過之後應該回頭校正。
+
+**Mac 上還有 MLX 這條路，選型表從來沒走過（未驗證）**
+Ollama 在 Apple Silicon 是**雙後端**：GGUF 模型走 llama.cpp ＋ Metal，`-mlx` tag 的模型才走 Apple 的 MLX 引擎，**兩者不會自動互轉**。選型表一律給 GGUF tag（`gemma4:12b`、`31b-it-qat` …），所以 Mac 路徑實際上一次都沒用到 MLX。
+
+registry 上有對應的 MLX tag，大小與 GGUF 版相近：`gemma4:31b-mlx`（19 GB）、`26b-mlx`（18 GB）、`31b-mlx-bf16`（64 GB），另有 `31b-nvfp4`（19 GB）與 `31b-mxfp8`（33 GB）。官方說法是 MLX 引擎「更快、更省記憶體」，Gemma 4 在 0.31 之後還有多 token 預測（MTP）加速；量化格式方面稱 NVFP4 比 q4_K_M 快約 20%。
+
+**這些都是官方部落格的說法，本專案一項都沒實測。** 兩件事要在階段八一起驗證：
+
+1. 同一台 Mac 上 `gemma4:12b`（GGUF）與對應 MLX tag 的速度與記憶體佔用差多少 —— 差很多的話 Mac 的選型表要另立一張，不能沿用 GPU 那張。
+2. MLX 引擎在 0.19 preview 時的門檻是「32 GB 以上統一記憶體」。這條若仍有效，24 GB 的 Mac 根本吃不到 MLX，會直接影響購買建議與選型分界。有沒有在後續版本放寬，沒查到。
+
+在驗證之前**不要把 MLX tag 寫進 `$MacProfiles` 之類的自動選型**，沒實測的東西不該讓腳本自動選中。
+
+**Gemma 4 的完整 tag 階梯（31B 是天花板）**
+Gemma 4 最大就是 31B，沒有更大的參數量。選型表只收了每個尺寸的其中一兩階，完整階梯是：
+
+| 尺寸 | qat | q4_K_M | mxfp8 | q8_0 | bf16 |
+|---|---|---|---|---|---|
+| 31B 密集 | 19 GB | 20 GB | 33 GB | 34 GB | 63 GB |
+| 26B MoE（a4b） | 16 GB | 18 GB | 28 GB | 28 GB | 52 GB |
+| 12B | — | 7.6 GB | — | — | — |
+
+另有 `gemma4:31b-coding-mtp-bf16`（64 GB），coding 專用且帶 MTP —— 對「OpenCode 跑 agent」這個用途最對口，但 64 GB 的體積要 96 GB 以上的機器才裝得下，目前沒有硬體可測。
+
+選型表刻意只放 qat 與 q8_0 兩階：qat 是同尺寸下最省的可用選擇，q8_0 是品質接近原始權重的那一階，中間的 q4_K_M 與 qat 差距小、不值得多一個分支。要用其他階就 `-Model` 手動指定。
 
 **Mac 要幾 GB 才選得到 MoE：36GB**
 把上面的比例套進 GPU 選型表（MoE 那階門檻是 23）：

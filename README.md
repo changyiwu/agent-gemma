@@ -64,6 +64,8 @@ Intel Mac 沒有 Ollama 可用的 GPU 加速，純 CPU 跑 12B 不堪用，所�
 
 `24 GB` 那階刻意選 MoE 的 `26b-a4b`：總參數 26B 但每次只啟用 4B，同樣顯存下比 31B 密集模型快得多。
 
+**31B 是 Gemma 4 的天花板**，沒有更大的參數量。表上每個尺寸只收了 qat 與 q8_0 兩階，registry 上還有中間與更高的精度 —— 31B 是 qat 19 GB / q4_K_M 20 GB / mxfp8 33 GB / q8_0 34 GB / bf16 63 GB，26B MoE 是 16 / 18 / 28 / 28 / 52 GB。另有 coding 專用的 `gemma4:31b-coding-mtp-bf16`（64 GB）。要用這些就 `-Model` 手動指定。
+
 ### Apple Silicon 怎麼換算
 
 M 系列是統一記憶體，CPU 和 GPU 共用同一塊。Metal 能取用的上限由 `iogpu.wired_limit_mb` 決定，未調整時大約是總記憶體的 65～75%。腳本取保守值換算成「等效 VRAM」後，套用上面同一張表：
@@ -79,6 +81,8 @@ M 系列是統一記憶體，CPU 和 GPU 共用同一塊。Metal 能取用的上
 | 64 GB | 80% | 51.2 GB | `gemma4:31b-it-q8_0` | 131072 |
 
 寧可低估也不要載到一半才發現爆掉。覺得太保守就用 `-Context` 或 `-Model` 自己指定。
+
+> ⚠️ **Mac 路徑尚未實機驗證**，上表的比例是保守估計。另外 Ollama 在 Apple Silicon 是 GGUF／MLX **雙後端** —— GGUF 走 llama.cpp ＋ Metal，`-mlx` tag 才走 Apple 的 MLX 引擎，不會自動互轉。本腳本一律選 GGUF tag，所以走的是 Metal 那條路。MLX 版官方宣稱更快更省記憶體，但本專案沒有實測，也還沒確認 MLX 的「32 GB 以上統一記憶體」門檻在新版是否仍然存在。
 
 **想跑 26B MoE 的話，自動選型的窗口只有 36–40 GB**：32 GB 差 0.6 GB 沒跨過門檻（實際上跑得動，權重才 16 GB），48 GB 以上則會跳到 31B 密集模型。這兩種情形都得手動指定：
 
