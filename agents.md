@@ -29,7 +29,7 @@
 - [x] 階段六：加入 Apple Silicon macOS 支援；測試擴充到 59 項
 - [x] 階段七：專案初始化三層級（L1 本地、L2 公開 GitHub、L3 Obsidian）
 - [ ] 階段八：在實體 Mac 上驗證 macOS 路徑（目前只有邏輯與 plist 格式測試，沒有實機跑過）
-- [ ] 階段九：驗證 24GB 那階的 MoE 選型（`gemma4:26b-a4b-it-qat` 對比 `31b-it-qat` 的速度與品質）。原本以為要一台 24GB 顯卡的機器，但 **36GB 以上的 Apple Silicon Mac 也能達成**（見下方選型表），可以跟階段八一起做掉
+- [~] 階段九：驗證 24GB 那階的 MoE 選型。**已在 16GB 卡上用 CPU offload 實測 `gemma4:26b-a4b-it-qat`**（見下方「MoE 實測」），結論與原假設相反：更快，但沒有更會自我檢查。**尚缺**：對比 `31b-it-qat`（沒下載）、24GB 卡全 GPU 的表現、Apple Silicon 路徑（併入階段八）
 - [x] 階段十：讓腳本處理 `opencode.jsonc`（盤點 `.json`／`.jsonc` 並存、`-Check` 兩份都讀並揪出死項目、寫入前警告重複的 provider 定義）；測試 59 → 72 項
 - [x] 階段十一：揪出 Ollama 桌面 app 的 GUI 設定覆蓋 `OLLAMA_CONTEXT_LENGTH`（腳本比對 server log 的實際注入值，不一致就報警並給修法）；測試 72 → 89 項
 
@@ -118,6 +118,8 @@ PARAMETER num_ctx 16384
 
 已實測驗證：這樣 `ollama create` 出來的衍生模型，走 OpenAI 相容端點載入時 `ollama ps` 的 CONTEXT 確實是 16384，蓋過全域設定。這也是 OpenCode 這條路上唯一能做到逐一模型控制上下文的方法（`num_ctx` 從 OpenAI 端點傳不進去，見下）。衍生模型共用權重 blob，不額外佔磁碟。
 
+`PC-YI-FY` 上留著的 `gemma4:12b-ctx16k` 就是這條結論的證物：與 `gemma4:12b` 指向同一批權重 blob、其餘參數全同，只多一個 `PARAMETER num_ctx 16384`。**沒有任何設定引用它**（`opencode.json` 只定義 `gemma4:12b`），磁碟成本為零，留著是為了日後要複驗「Modelfile 蓋過全域」時不必重建 —— 跑 `ollama run gemma4:12b-ctx16k` 再看 `ollama ps` 的 CONTEXT 即可。
+
 **`num_ctx` 無法從 OpenAI 相容端點傳入（已實測）**
 同一台機器上三個對照：`/v1/chat/completions` 不帶參數 → 載入 4096；`/v1/chat/completions` 帶 `options.num_ctx=32768` → 仍是 4096，被靜默忽略；原生 `/api/chat` 帶同樣參數 → 32768。OpenCode 走 `@ai-sdk/openai-compatible`，打的是前者，所以 `opencode.json` 在協定層面上就無法決定實際載入的上下文，只能靠 `OLLAMA_CONTEXT_LENGTH` 或 Modelfile。
 
@@ -126,6 +128,35 @@ PARAMETER num_ctx 16384
 
 **24GB 那階選 MoE**
 `gemma4:26b-a4b-it-qat`（16 GB）總參數 26B 但每次只啟用 4B，同顯存下比 31B 密集模型快得多。
+
+**MoE 實測：更快，但沒有更會自我檢查（2026-08-22，PC-YI-FY）**
+在 16GB 卡（RTX 5060 Ti）上實測，權重 16 GB 塞不進 VRAM，靠 61.7 GB 系統記憶體做 CPU offload：
+
+| 模型 | 分配 | 速度 |
+|---|---|---|
+| `gemma4:12b` 密集 | 100% GPU、8.2 GB | 38.8 tok/s |
+| `gemma4:26b-a4b-it-qat` | **31%/69% CPU/GPU**、16 GB | **49.8 tok/s** |
+
+**即使 31% 掉到 CPU，MoE 仍比 12B 快 28%** —— 每個 token 只算 4B，而 12B 密集要算滿。這推翻了「16GB 卡上不了這一階」的假設：有大記憶體就能用 offload 換到，速度反而更好。
+
+但**能力沒有跟著上去**。用同一個模糊指令（「把 timeout 調成 60，相關的地方都要一起改」，兩處要改：`config.py` 與 `README.md`），各跑三次、都放了要求 grep 驗證的 `AGENTS.md`：
+
+| | 兩處都改對 | **真的執行驗證 grep** | 謊報驗證 |
+|---|---|---|---|
+| `gemma4:12b` | 3/3 | **0/3** | 2/3 |
+| `gemma4:26b-a4b-it-qat` | 3/3 | **1/3** | 2/3 |
+
+MoE 唯一一次「真的驗證」是運氣不是能力。兩個模型都會**聲稱驗證過但沒執行**，其中 MoE 有一次還把 `grep` 的指令與輸出整段假造出來。沒有 `AGENTS.md` 時 MoE 更糟：除了同樣漏掉 README，還在 `config.py` 多塞一行死註解 `# TIMEOUT = 60`。
+
+**選型要看激活參數，不是總參數**
+這是上面那組數字的解釋，也是比記住模型名更有用的一條：MoE 的**總參數決定知識廣度，激活參數決定推理深度**。自我稽核（拿當前狀態回頭比對原始目標）是推理能力，所以 `26b-a4b` 在這件事上表現得像 4B，不像 26B。
+
+想買到穩定的自我稽核，要的是密集 30B+ 或激活參數大得多的 MoE —— 那已超出 16GB 卡加 offload 的舒適範圍。原本路線圖裡「MoE 是 24GB 那階的升級」這個假設，只在速度與知識廣度上成立，在 agentic 可靠度上不成立。
+
+**`AGENTS.md` 的效果大於換模型**
+同一組測試裡，有 `AGENTS.md` 的六次**全部**改對兩處；沒有規則的兩次（12B、MoE 各一）**全部**漏掉 README。規則能有效擴充「該改哪些地方」的檢查清單 —— 那只需照著清單執行，正是這個級距的強項；但規則要求的**自我稽核叫不出來**，模型只學會模仿回報格式。
+
+實務結論：先寫 `AGENTS.md`，別急著換模型；且**不要相信模型的驗證聲明**，重要改動自己 `git diff`。要它驗證就寫「把 grep 的原始輸出貼出來」（執行），而不是「去確認有沒有殘留」（稽核）。
 
 **技能放專案層級，不進全域**
 路徑是 `.opencode/skills/gemma-setup/` —— OpenCode 對專案技能會從 cwd 往上找到 git worktree 根目錄。刻意不裝進 `~/.config/opencode/skills/`，也不跑 `sync-skills`：這個技能只服務「OpenCode 接本機模型」這一件事，沒有跨專案使用的理由，放全域只會在每個專案的技能清單裡佔位置。
@@ -167,6 +198,26 @@ Intel Mac 沒有 Ollama 可用的 GPU 加速（Metal 後端只對 Apple Silicon 
 
 **設定合併不覆寫整份檔案**
 `opencode.json` 裡還有 mcp、permission、experimental 等使用者既有設定。腳本用 `ConvertFrom-Json -AsHashtable` 讀進來、只改 `provider.ollama` 這一支、再寫回，並在寫入前備份成 `opencode.json.bak-<時間戳>`（同一秒重跑會自動加序號，不覆蓋前一份）。
+
+## 工作約定
+
+操作型規則，與上面的「技術決策」分開：那邊解釋為什麼這樣設計，這邊是動手時不要踩的雷。
+
+**測 OpenCode CLI：不可用 `timeout` 包裝，也不可放進巢狀 bash 腳本**
+兩種寫法都會讓 `opencode run` **卡死在啟動階段** —— log 檔全空、模型完全沒載入、進程掛著不退，外觀跟「模型跑很慢」一模一樣。直接在命令列跑則一切正常。要限制時間就改成背景執行、事後用 `Stop-Process` 終止。
+
+這條記下來是因為它在 2026-08-22 那次連續造成三次誤判：先誤以為是目錄被鎖、再誤以為是 MCP server 連線卡住，最後才發現凡是被 `timeout` 或巢狀腳本包起來的都失敗、直接跑的都成功。下一個 Agent 很可能重踩。
+
+**清理測試進程時，比對條件不要包含自己會出現的字串**
+用 `Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match '...' }` 掃殺殘留進程時，若比對字串正好出現在自己這行命令裡，會把自己殺掉（表現為 exit 255）。同一次工作階段內犯過兩次。改用進程名 `-Filter "Name='opencode.exe'"` 篩選，或挑一個不會出現在清理指令自身的特徵字串。
+
+Windows 上 `opencode.exe`（CLI）與 `OpenCode.exe`（桌面 app）在 WMI 查詢裡可用大小寫區分，篩 CLI 用小寫那個，不會誤傷使用者開著的桌面版。
+
+**用 `until ... sleep` 等背景工作時，殺掉工作也要停等待迴圈**
+等待迴圈盯的是某個檔案裡的完成標記。一旦把產生標記的腳本殺了（或把檔案刪了），條件永遠不成立，迴圈會無限空轉、不會自己結束也不會回報。殺工作時要連等待方一起停。
+
+**Ollama 升級後跑一次 `-Check`**
+桌面 app 的 context length 存在 `db.sqlite`（`schema_version` 目前 16），大版本升級若動到 schema 或重設預設值，設好的值可能被打回出廠的 32768，且沒有任何提示。原因見上面「Ollama 桌面 app 的 GUI 設定會覆蓋 `OLLAMA_CONTEXT_LENGTH`」。
 
 ## 測試
 
